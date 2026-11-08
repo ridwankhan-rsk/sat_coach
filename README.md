@@ -12,8 +12,8 @@ An adaptive practice coach for the **Digital SAT**. It gives you short sessions 
 Requires Python 3.11+.
 
 ```bash
-git clone https://github.com/<you>/sat-coach.git
-cd sat-coach
+git clone https://github.com/ridwankhan-rsk/sat_coach.git
+cd sat_coach
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[pdf]"
 cp .env.example .env     # then paste a free key from https://aistudio.google.com/apikey into GEMINI_API_KEY
