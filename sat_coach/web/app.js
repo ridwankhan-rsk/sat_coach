@@ -6,6 +6,14 @@ const DOMAIN_NAMES = {
   geometry_trig: "Geometry & Trigonometry", information_ideas: "Information & Ideas",
   craft_structure: "Craft & Structure", expression_ideas: "Expression of Ideas", conventions: "Standard English Conventions",
 };
+// Where a question came from: the committed seed set, the user's imported official PDFs,
+// or the LLM. Generated variants of missed questions are labeled separately.
+function sourceTag(q) {
+  if (q.origin === "generated" && q.parent_id) return '<span class="tag src gen" title="Generated: a new question modeled on one you missed">Generated · variant</span>';
+  if (q.origin === "generated") return '<span class="tag src gen" title="Written by the AI generator and checked before use">Generated</span>';
+  if (q.origin === "official") return '<span class="tag src" title="Imported from your official practice PDFs">Official</span>';
+  return '<span class="tag src" title="From the original seed question set">Original</span>';
+}
 const REASON_LABEL = { baseline: "Baseline", weak: "Focus skill", coverage: "Coverage", review: "Review" };
 
 let me = null;
@@ -87,10 +95,16 @@ async function home() {
       </div>
       <div class="card" style="display:flex;flex-direction:column;justify-content:center;gap:10px">
         <button class="btn" id="start">${me.open_session ? "Resume session" : first ? "Start baseline session" : "Start next session"}</button>
-        <span class="muted small">Bank: ${status.bank.math} math · ${status.bank.rw} R&W · ${status.bank.passages} passages${status.llm ? ` · generator: ${esc(status.llm)}` : ""}</span>
+        <span class="muted small">${bankLine("Math", status.bank.by_origin.math)}<br>${bankLine("R&W", status.bank.by_origin.rw)} · ${status.bank.passages} articles${status.llm ? `<br>Generator: ${esc(status.llm)}` : ""}</span>
       </div>
     </div>`);
   document.getElementById("start").onclick = startSession;
+}
+
+function bankLine(label, counts = {}) {
+  const names = { seed: "original", official: "official", generated: "generated" };
+  const parts = ["seed", "official", "generated"].filter((o) => counts[o]).map((o) => `${counts[o]} ${names[o]}`);
+  return `${label}: ${parts.join(" · ") || "none"}`;
 }
 
 async function startSession() {
@@ -149,6 +163,7 @@ function renderQuestion() {
           <span class="tag">${esc(q.skill_name)}</span>
           <span class="tag">${esc(q.difficulty)}</span>
           ${q.reason === "review" ? '<span class="tag">Review</span>' : ""}
+          ${sourceTag(q)}
         </div>
         ${q.excerpt ? `<div class="excerpt">${esc(q.excerpt)}</div>` : ""}
         <p class="stem">${esc(q.stem)}</p>
@@ -210,7 +225,8 @@ function resultsPage(res) {
   view(`
     <h1>Session results</h1>
     <div class="grid">
-      <div class="card"><div class="muted small">Correct</div><div class="score-big">${right}/${qs.length}</div><div class="muted small">Math ${bySection("math")} · R&W ${bySection("rw")}</div></div>
+      <div class="card"><div class="muted small">Correct</div><div class="score-big">${right}/${qs.length}</div><div class="muted small">Math ${bySection("math")} · R&W ${bySection("rw")}</div>
+        <div class="muted small">${qs.filter((q) => q.origin === "generated").length} generated · ${qs.filter((q) => q.origin !== "generated").length} from the original/official set</div></div>
       <div class="card"><div class="muted small">Projected score</div>
         <div class="score-row"><span class="score-big">${score.total}</span>${delta != null ? `<span class="delta ${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "+" : ""}${delta} since last session</span>` : ""}</div>
         <div class="muted small">± ${score.band} · Math ${score.math} · R&W ${score.rw} · an estimate from your practice, not an official score</div></div>
@@ -220,7 +236,7 @@ function resultsPage(res) {
     <p class="muted small">For each miss, tag why it happened. It helps tell concept gaps apart from careless slips.</p>
     ${qs.map((q, i) => `
       <div class="card result ${q.correct ? "ok" : "miss"}">
-        <div class="meta"><span class="tag">Q${i + 1}</span><span class="tag">${esc(q.skill_name)}</span><span class="tag">${esc(q.difficulty)}</span>${q.reason === "review" ? '<span class="tag">Review</span>' : ""}</div>
+        <div class="meta"><span class="tag">Q${i + 1}</span><span class="tag">${esc(q.skill_name)}</span><span class="tag">${esc(q.difficulty)}</span>${q.reason === "review" ? '<span class="tag">Review</span>' : ""}${sourceTag(q)}</div>
         ${q.passage_id && res.passages[q.passage_id] ? `<div class="muted small">From “${esc(res.passages[q.passage_id].title)}”</div>` : ""}
         ${q.excerpt ? `<div class="excerpt">${esc(q.excerpt)}</div>` : ""}
         <p class="stem">${esc(q.stem)}</p>

@@ -71,6 +71,9 @@ class SessionItem(SQLModel, table=True):
     question_id: int = Field(foreign_key="question.id")
     position: int
     reason: str  # baseline | weak | coverage | review
+    # How this question got into the session: bank (existing question), generated (written
+    # by the LLM for this session), fallback (a repeat or related question), review.
+    source: str = "bank"
 
 
 class Attempt(SQLModel, table=True):
@@ -107,20 +110,39 @@ class ReviewItem(SQLModel, table=True):
 
 _engine = None
 
+# Columns added after the first release: (table, column, SQL type and default).
+_ADDED_COLUMNS = [("sessionitem", "source", "VARCHAR NOT NULL DEFAULT 'bank'")]
+
+
+def _migrate(engine) -> None:
+    """Add columns that newer versions introduced to an existing SQLite database."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        for table, col, ddl in _ADDED_COLUMNS:
+            cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            if cols and col not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+
+
+def _make_engine(url: str):
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    _migrate(engine)
+    return engine
+
 
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_engine(get_settings().db_url, connect_args={"check_same_thread": False})
-        SQLModel.metadata.create_all(_engine)
+        _engine = _make_engine(get_settings().db_url)
     return _engine
 
 
 def reset_engine(url: str | None = None):
     """Point the app at another database (used by tests)."""
     global _engine
-    _engine = create_engine(url or get_settings().db_url, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(_engine)
+    _engine = _make_engine(url or get_settings().db_url)
     return _engine
 
 

@@ -35,6 +35,8 @@ After you submit:
 - for each miss you can tag **why** it happened: didn't know how, careless mistake, or ran out of time
 - your **projected score** (Math + R&W, 400–1600, with a ± range) updates and is charted on the Progress page
 
+Every question card is tagged **Original** (the seed set), **Official** (your imported PDFs) or **Generated**. Generated variants of questions you missed are tagged **Generated · variant**.
+
 The **Insights** page shows what the coach knows about you: a skill-by-difficulty accuracy table, your most-missed questions, and the review queue.
 
 ### Under the hood
@@ -58,6 +60,9 @@ sat-coach fetch-passages          # download more real passages (Project Gutenbe
 sat-coach generate --math 12 --rw-sets 2   # pre-generate questions so sessions start instantly
 sat-coach import-pdfs ~/Downloads/sat     # import official practice PDFs you downloaded (see below)
 sat-coach stats "Ana"             # projected score and weakest skills for a profile
+sat-coach bank                    # how many questions are original / official / generated
+sat-coach bank --origin generated --section math   # list the generated questions
+sat-coach preview "Ana"           # what Ana's next session will contain and which questions it will generate
 sat-coach users add "Ana" / sat-coach users list
 ```
 

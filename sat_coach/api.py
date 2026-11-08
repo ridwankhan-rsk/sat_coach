@@ -53,6 +53,11 @@ def status():
             for sec in ("math", "rw")
         }
         counts["passages"] = db.exec(select(func.count()).select_from(Passage)).one()
+        by_origin: dict[str, dict[str, int]] = {"math": {}, "rw": {}}
+        rows = db.exec(select(Question.section, Question.origin, func.count()).group_by(Question.section, Question.origin)).all()
+        for section, origin, n in rows:
+            by_origin.setdefault(section, {})[origin] = n
+        counts["by_origin"] = by_origin
     return {"llm": llm.name if llm else None, "provider": s.llm_provider, "bank": counts}
 
 

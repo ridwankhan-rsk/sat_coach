@@ -79,3 +79,5 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 .table-wrap { overflow-x: auto; }
 .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; vertical-align: middle; margin-right: 8px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.tag.src { border-style: dashed; }
+.tag.src.gen { color: var(--accent); border-color: var(--accent); }

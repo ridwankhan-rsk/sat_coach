@@ -138,3 +138,45 @@ def test_rw_generation_for_fresh_passage():
     data = svc.load_session(svc.start_session(uid), uid, reveal=False)
     rw = [q for q in data["questions"] if q["section"] == "rw"]
     assert len(rw) == 5 and data["passages"][rw[0]["passage_id"]]["title"] == "Test Article"
+
+
+def test_plan_marks_bank_slots_and_matches_real_session():
+    uid = make_user()
+    plan = svc.plan_session(uid, llm_available=False)
+    assert plan.kind == "baseline"
+    assert all(m.source == "bank" and m.origin == "seed" for m in plan.math)
+    assert plan.rw_source == "bank" and len(plan.rw) == 5
+    planned = [m.question_id for m in plan.math + plan.rw]
+    sid = svc.start_session(uid)
+    data = svc.load_session(sid, uid, reveal=False)
+    assert [q["id"] for q in data["questions"]] == planned  # preview == what actually happened
+    assert all(q["origin"] == "seed" and q["source"] == "bank" for q in data["questions"])
+    assert all("answer" not in q for q in data["questions"])
+
+
+def test_plan_reports_generation_and_session_records_it():
+    uid = make_user()
+    with session() as s:
+        for q in s.exec(select(Question).where(Question.section == "math")).all():
+            s.delete(q)
+        s.commit()
+    plan = svc.plan_session(uid, llm_available=True)
+    assert [m.source for m in plan.math] == ["generate"] * 8
+    with session() as s:  # planning makes no writes
+        assert s.exec(select(SkillState).where(SkillState.user_id == uid)).all() == []
+    set_llm(FakeLLM(lambda p: {"items": [_item("B", n) for n in range(2, 10)]}, lambda p: {"answers": ["B"] * 8}))
+    data = svc.load_session(svc.start_session(uid), uid, reveal=False)
+    math = [q for q in data["questions"] if q["section"] == "math"]
+    assert len(math) == 8
+    assert all(q["source"] == "generated" and q["origin"] == "generated" for q in math)
+
+
+def test_offline_plan_uses_fallback_when_bank_is_exhausted():
+    uid = make_user()
+    with session() as s:
+        for q in s.exec(select(Question).where(Question.section == "math", Question.skill != "percentages")).all():
+            s.delete(q)
+        s.commit()
+    plan = svc.plan_session(uid, llm_available=False)
+    assert any(m.source == "fallback" for m in plan.math)
+    assert not any(m.source == "generate" for m in plan.math)

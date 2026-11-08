@@ -98,6 +98,73 @@ def stats(name: str):
         typer.echo(f"  {sk['name']}: {sk['accuracy']:.0%} over {sk['attempts']}")
 
 
+ORIGIN_LABEL = {"seed": "original (seed set)", "official": "official (your imported PDFs)", "generated": "generated"}
+
+
+@app.command()
+def bank(
+    origin: str = typer.Option(None, help="Only list questions with this origin: seed, official or generated."),
+    section: str = typer.Option(None, help="math or rw"),
+    limit: int = 30,
+):
+    """Show where the question bank's questions come from, optionally listing them."""
+    with session() as s:
+        rows = s.exec(select(Question.section, Question.origin, func.count()).group_by(Question.section, Question.origin)).all()
+        typer.echo("Question bank by source:")
+        for sec in ("math", "rw"):
+            parts = [f"{n} {ORIGIN_LABEL.get(o, o)}" for se, o, n in rows if se == sec]
+            typer.echo(f"  {'Math' if sec == 'math' else 'R&W':5} {', '.join(parts) or 'none'}")
+        if origin is None and section is None:
+            typer.echo("\nList questions with e.g.: sat-coach bank --origin generated --section math")
+            return
+        q = select(Question).order_by(Question.id.desc())
+        if origin:
+            q = q.where(Question.origin == origin)
+        if section:
+            q = q.where(Question.section == section)
+        items = s.exec(q.limit(limit)).all()
+        typer.echo("")
+        for it in items:
+            var = f" (variant of #{it.parent_id})" if it.parent_id else ""
+            stem = " ".join(it.stem.split())[:70]
+            typer.echo(f"#{it.id:<5} {it.origin:9} {it.section:4} {it.skill:24} {it.difficulty:6} "
+                       f"{it.created_at:%Y-%m-%d}{var}  {stem}")
+
+
+@app.command()
+def preview(name: str):
+    """Show what a profile's next session will contain and which questions will be generated.
+    Makes no API calls and changes nothing."""
+    from .coach.sessions import open_session, plan_session
+    from .llm import get_llm
+    from .taxonomy import SKILL_BY_ID
+
+    with session() as s:
+        u = s.exec(select(User).where(User.name == name)).first()
+    if not u:
+        raise typer.BadParameter(f"No profile named {name!r}")
+    if open_session(u.id):
+        typer.echo(f"{name} has an unfinished session; it will resume as is. Finish it to preview the next one.")
+        return
+    llm = get_llm()
+    plan = plan_session(u.id, llm_available=llm is not None)
+    typer.echo(f"Next session for {name}: {plan.kind}   generator: {llm.name if llm else 'none (offline)'}\n")
+    label = {"bank": "from bank", "generate": "WILL BE GENERATED", "variant": "WILL BE GENERATED (variant of a missed question)",
+             "fallback": "repeat/related (bank ran out)", "review": "review: the question you missed"}
+    with session() as s:
+        for i, m in enumerate(plan.math + plan.rw, 1):
+            if i == len(plan.math) + 1:
+                src = {"bank": "existing question set", "generate": "new questions WILL BE GENERATED",
+                       "fallback": "reused set (no fresh article)"}.get(plan.rw_source, plan.rw_source)
+                typer.echo(f"\nReading & Writing: {plan.passage_title or 'no article'} ({src})")
+            where = label.get(m.source, m.source)
+            if m.question_id and m.source != "generate":
+                where += f": #{m.question_id} [{ORIGIN_LABEL.get(m.origin, m.origin)}]"
+            typer.echo(f"  {i:2}. {SKILL_BY_ID[m.skill].name[:45]:45} {m.difficulty:6} {m.reason:8} {where}")
+    n_gen = sum(m.source in ("generate", "variant") for m in plan.math + plan.rw)
+    typer.echo(f"\n{n_gen} question(s) will be generated; the rest come from the existing bank.")
+
+
 @users_app.command("add")
 def users_add(name: str):
     with session() as s:

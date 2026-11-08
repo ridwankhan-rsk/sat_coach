@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import random
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlmodel import Session, func, select
@@ -35,25 +36,25 @@ def _seen_ids(s: Session, user_id: int) -> set[int]:
     return set(rows)
 
 
-def _pick_from_bank(s: Session, skill: str, difficulty: str, exclude: set[int]) -> Question | None:
-    base = select(Question).where(Question.section == "math", Question.skill == skill)
+def _pick_from_bank(s: Session, skill: str, difficulty: str, exclude: set[int], rng: random.Random) -> Question | None:
+    base = select(Question).where(Question.section == "math", Question.skill == skill).order_by(Question.id)
     rows = [q for q in s.exec(base).all() if q.id not in exclude]
     exact = [q for q in rows if q.difficulty == difficulty]
     pool = exact or rows
-    return random.choice(pool) if pool else None
+    return rng.choice(pool) if pool else None
 
 
-def _fallback_math(s: Session, skill: str, exclude: set[int], seen: set[int]) -> Question | None:
+def _fallback_math(s: Session, skill: str, exclude: set[int], seen: set[int], rng: random.Random) -> Question | None:
     """No unseen item and no generator: same domain unseen, then any unseen, then a repeat."""
     dom = SKILL_BY_ID[skill].domain
-    all_math = s.exec(select(Question).where(Question.section == "math")).all()
+    all_math = s.exec(select(Question).where(Question.section == "math").order_by(Question.id)).all()
     for pool in (
         [q for q in all_math if q.domain == dom and q.id not in exclude],
         [q for q in all_math if q.id not in exclude],
         [q for q in all_math if q.skill == skill and q.id not in exclude - seen],
     ):
         if pool:
-            return random.choice(pool)
+            return rng.choice(pool)
     return None
 
 
@@ -65,17 +66,48 @@ def open_session(user_id: int) -> PracticeSession | None:
         ).first()
 
 
-def start_session(user_id: int, rng: random.Random | None = None) -> int:
-    """Create (or resume) the user's next session and return its id."""
-    existing = open_session(user_id)
-    if existing:
-        return existing.id
-    rng = rng or random.Random()
-    llm = get_llm()
+# ---------------------------------------------------------------- planning
+# A session is built in two steps. plan_session() decides, for every slot, where the
+# question will come from (question bank, LLM generation, or a fallback repeat) without
+# calling the LLM or writing anything; start_session() then carries out that plan.
+# `sat-coach preview` prints the plan, so you can see in advance what will be generated.
+
+
+@dataclass
+class PlannedItem:
+    section: str
+    skill: str
+    difficulty: str
+    reason: str  # baseline | weak | coverage | review
+    source: str  # bank | generate | variant | fallback | review
+    question_id: int | None = None  # set for bank / fallback / review (and the original, for variant)
+    origin: str | None = None  # origin of question_id: seed | official | generated
+
+
+@dataclass
+class SessionPlan:
+    kind: str
+    math: list[PlannedItem] = field(default_factory=list)
+    rw: list[PlannedItem] = field(default_factory=list)
+    rw_source: str = "none"  # bank | generate | fallback | none
+    passage_id: int | None = None
+    passage_title: str | None = None
+    rw_skills: list[str] = field(default_factory=list)
+    rw_difficulties: list[str] = field(default_factory=list)
+
+
+def _session_rng(user_id: int, done: int) -> random.Random:
+    """Deterministic per (user, session number), so a preview matches the real session."""
+    return random.Random(f"{user_id}:{done}")
+
+
+def plan_session(user_id: int, llm_available: bool | None = None) -> SessionPlan:
+    if llm_available is None:
+        llm_available = get_llm() is not None
     with session() as s:
         done = sessions_done(s, user_id)
+        rng = _session_rng(user_id, done)
         states = mastery.get_states(s, user_id)
-        s.commit()
         if done == 0:
             bp = selector.baseline(rng)
         else:
@@ -86,111 +118,164 @@ def start_session(user_id: int, rng: random.Random | None = None) -> int:
                 if q:
                     meta[q.id] = (q.section, q.skill, q.difficulty)
             bp = selector.adaptive(states, due, meta, rng)
+        s.rollback()  # get_states may have created rows; planning writes nothing
         seen = _seen_ids(s, user_id)
+        plan = SessionPlan(kind=bp.kind)
+        exclude = set(seen)
 
-    chosen: list[tuple[Question, str]] = []  # (question, reason)
-    exclude = set(seen)
-
-    # ---- Math
-    need_gen: list[int] = []
-    slots_q: list[Question | None] = []
-    with session() as s:
-        for i, slot in enumerate(bp.math):
+        # ---- Math
+        pending_fallback: list[PlannedItem] = []
+        for slot in bp.math:
+            item = PlannedItem("math", slot.skill, slot.difficulty, slot.reason, "bank")
             if slot.reason == "review" and slot.review_question_id:
                 orig = s.get(Question, slot.review_question_id)
-                slots_q.append(orig)
-                continue
-            q = _pick_from_bank(s, slot.skill, slot.difficulty, exclude)
-            if q is not None:
-                exclude.add(q.id)
-            else:
-                need_gen.append(i)
-            slots_q.append(q)
-
-    # Review items after the first pass get a fresh variant ("similar to what you missed").
-    if llm is not None:
-        with session() as s:
-            for i, slot in enumerate(bp.math):
-                if slot.reason != "review" or slots_q[i] is None:
+                if orig is None:
                     continue
-                item = s.exec(select(ReviewItem).where(ReviewItem.user_id == user_id,
-                                                       ReviewItem.question_id == slot.review_question_id)).first()
-                if item and item.box >= 2:
-                    var = generate_math(llm, [(slot.skill, slot.difficulty)], variant_of=slots_q[i], rounds=1)[0]
-                    if var is not None:
-                        slots_q[i] = var
-        if need_gen:
-            made = generate_math(llm, [(bp.math[i].skill, bp.math[i].difficulty) for i in need_gen])
-            for i, q in zip(need_gen, made):
-                slots_q[i] = q
-    with session() as s:
-        for i, slot in enumerate(bp.math):
-            q = slots_q[i]
-            if q is None:
-                q = _fallback_math(s, slot.skill, exclude, seen)
-            if q is None:
-                continue
-            exclude.add(q.id)
-            chosen.append((q, slot.reason))
+                ri = s.exec(select(ReviewItem).where(ReviewItem.user_id == user_id,
+                                                     ReviewItem.question_id == slot.review_question_id)).first()
+                item.question_id, item.origin = orig.id, orig.origin
+                item.source = "variant" if (llm_available and ri and ri.box >= 2) else "review"
+                exclude.add(orig.id)
+            else:
+                q = _pick_from_bank(s, slot.skill, slot.difficulty, exclude, rng)
+                if q is not None:
+                    item.question_id, item.origin = q.id, q.origin
+                    exclude.add(q.id)
+                elif llm_available:
+                    item.source = "generate"
+                else:
+                    item.source = "fallback"
+                    pending_fallback.append(item)
+            plan.math.append(item)
+        for item in pending_fallback:
+            q = _fallback_math(s, item.skill, exclude, seen, rng)
+            if q is not None:
+                item.question_id, item.origin = q.id, q.origin
+                exclude.add(q.id)
+        plan.math = [m for m in plan.math if m.source in ("generate", "variant") or m.question_id is not None]
 
-    # ---- Reading & Writing: one article + its question set
-    chosen += _build_rw(user_id, bp, llm, seen, rng)
-
-    with session() as s:
-        ps = PracticeSession(user_id=user_id, kind=bp.kind)
-        s.add(ps)
-        s.commit()
-        s.refresh(ps)
-        for pos, (q, reason) in enumerate(chosen):
-            s.add(SessionItem(session_id=ps.id, question_id=q.id, position=pos, reason=reason))
-        s.commit()
-        return ps.id
-
-
-def _build_rw(user_id: int, bp: selector.Blueprint, llm, seen: set[int], rng: random.Random) -> list[tuple[Question, str]]:
-    out: list[tuple[Question, str]] = []
-    with session() as s:
-        passages = s.exec(select(Passage)).all()
-        rw_qs = s.exec(select(Question).where(Question.section == "rw")).all()
+        # ---- Reading & Writing: one article and its question set
+        plan.rw_skills, plan.rw_difficulties = list(bp.rw_skills), list(bp.rw_difficulties)
+        passages = s.exec(select(Passage).order_by(Passage.id)).all()
+        rw_qs = s.exec(select(Question).where(Question.section == "rw").order_by(Question.id)).all()
         used_passages = {q.passage_id for q in rw_qs if q.id in seen and q.passage_id}
         by_passage: dict[int, list[Question]] = {}
         for q in rw_qs:
             if q.passage_id:
                 by_passage.setdefault(q.passage_id, []).append(q)
         fresh = [p for p in passages if p.id not in used_passages]
+        reason = "baseline" if bp.kind == "baseline" else "weak"
 
         def pick_set(qs: list[Question]) -> list[Question]:
             # Prefer questions on the blueprint's skills, keeping the set to RW_COUNT.
-            wanted = list(bp.rw_skills)
-            pref = []
-            for sk in wanted:
+            pref: list[Question] = []
+            for sk in bp.rw_skills:
                 m = next((q for q in qs if q.skill == sk and q not in pref), None)
                 if m:
                     pref.append(m)
-            rest = [q for q in qs if q not in pref]
-            return (pref + rest)[: selector.RW_COUNT]
+            return (pref + [q for q in qs if q not in pref])[: selector.RW_COUNT]
 
-        selected: list[Question] = []
-        # 1) A fresh passage that already has a full, unseen question set.
+        def use_set(qs: list[Question], source: str) -> None:
+            plan.rw_source = source
+            plan.rw = [PlannedItem("rw", q.skill, q.difficulty, reason, source, q.id, q.origin) for q in qs]
+
         ready = [p for p in fresh if len([q for q in by_passage.get(p.id, []) if q.id not in seen]) >= 4]
         if ready:
             p = rng.choice(ready)
-            selected = pick_set([q for q in by_passage[p.id] if q.id not in seen])
-        elif llm is not None and fresh:
-            # 2) Generate a set for a fresh passage (prefer ones with no questions yet).
+            plan.passage_id, plan.passage_title = p.id, p.title
+            use_set(pick_set([q for q in by_passage[p.id] if q.id not in seen]), "bank")
+        elif llm_available and fresh:
             p = min(fresh, key=lambda x: (len(by_passage.get(x.id, [])), rng.random()))
-            selected = generate_rw_set(llm, p, bp.rw_skills, bp.rw_difficulties)
-        if not selected and by_passage:
-            # 3) Offline and out of fresh passages: reuse the passage seen longest ago.
-            pid = rng.choice(list(by_passage))
-            selected = pick_set(by_passage[pid])
-        out += [(q, "baseline" if bp.kind == "baseline" else "weak") for q in selected]
+            plan.passage_id, plan.passage_title, plan.rw_source = p.id, p.title, "generate"
+            plan.rw = [PlannedItem("rw", sk, d, reason, "generate") for sk, d in zip(bp.rw_skills, bp.rw_difficulties)]
+        elif by_passage:
+            pid = rng.choice(sorted(by_passage))
+            plan.passage_id, plan.passage_title = pid, s.get(Passage, pid).title
+            use_set(pick_set(by_passage[pid]), "fallback")
 
         for qid in bp.rw_review:
             q = s.get(Question, qid)
-            if q and q not in selected:
-                out.append((q, "review"))
-    return out
+            if q and all(r.question_id != q.id for r in plan.rw):
+                plan.rw.append(PlannedItem("rw", q.skill, q.difficulty, "review", "review", q.id, q.origin))
+        return plan
+
+
+def start_session(user_id: int) -> int:
+    """Create (or resume) the user's next session by carrying out plan_session()."""
+    existing = open_session(user_id)
+    if existing:
+        return existing.id
+    llm = get_llm()
+    plan = plan_session(user_id, llm_available=llm is not None)
+    with session() as s:
+        done = sessions_done(s, user_id)
+        seen = _seen_ids(s, user_id)
+    rng = _session_rng(user_id, done)
+    exclude = set(seen) | {m.question_id for m in plan.math if m.question_id}
+
+    # (question_id, reason, how it was sourced) in session order
+    math_out: list[tuple[int | None, str, str]] = []
+    gen_idx = [i for i, m in enumerate(plan.math) if m.source == "generate"]
+    made = generate_math(llm, [(plan.math[i].skill, plan.math[i].difficulty) for i in gen_idx]) if gen_idx else []
+    made_by_slot = dict(zip(gen_idx, made))
+    for i, m in enumerate(plan.math):
+        if m.source == "generate":
+            q = made_by_slot.get(i)
+            math_out.append((q.id, m.reason, "generated") if q else (None, m.reason, "fallback"))
+        elif m.source == "variant":
+            with session() as s:
+                orig = s.get(Question, m.question_id)
+            var = generate_math(llm, [(m.skill, m.difficulty)], variant_of=orig, rounds=1)[0]
+            math_out.append((var.id, m.reason, "generated") if var else (orig.id, m.reason, "review"))
+        else:
+            math_out.append((m.question_id, m.reason, m.source))
+    # Generation failures fall back to the bank.
+    with session() as s:
+        for i, (qid, reason, src) in enumerate(math_out):
+            if qid is None:
+                q = _fallback_math(s, plan.math[i].skill, exclude, seen, rng)
+                if q is not None:
+                    exclude.add(q.id)
+                    math_out[i] = (q.id, reason, "fallback")
+
+    rw_out: list[tuple[int | None, str, str]] = []
+    if plan.rw_source == "generate":
+        with session() as s:
+            p = s.get(Passage, plan.passage_id)
+        made_rw = generate_rw_set(llm, p, plan.rw_skills, plan.rw_difficulties)
+        rw_out = [(q.id, it.reason, "generated") for q, it in zip(made_rw, plan.rw)]
+        if not made_rw:  # generation failed: reuse an existing set, as the offline path does
+            rw_out = _fallback_rw_set(plan, rng)
+        rw_out += [(it.question_id, "review", "review") for it in plan.rw if it.source == "review"]
+    else:
+        rw_out = [(it.question_id, it.reason, it.source) for it in plan.rw]
+
+    with session() as s:
+        ps = PracticeSession(user_id=user_id, kind=plan.kind)
+        s.add(ps)
+        s.commit()
+        s.refresh(ps)
+        pos = 0
+        for qid, reason, src in math_out + rw_out:
+            if qid is None:
+                continue
+            s.add(SessionItem(session_id=ps.id, question_id=qid, position=pos, reason=reason, source=src))
+            pos += 1
+        s.commit()
+        return ps.id
+
+
+def _fallback_rw_set(plan: SessionPlan, rng: random.Random) -> list[tuple[int | None, str, str]]:
+    with session() as s:
+        rw_qs = s.exec(select(Question).where(Question.section == "rw", Question.passage_id != None).order_by(Question.id)).all()  # noqa: E711
+    by_passage: dict[int, list[Question]] = {}
+    for q in rw_qs:
+        by_passage.setdefault(q.passage_id, []).append(q)
+    if not by_passage:
+        return []
+    pid = rng.choice(sorted(by_passage))
+    reason = "baseline" if plan.kind == "baseline" else "weak"
+    return [(q.id, reason, "fallback") for q in by_passage[pid][: selector.RW_COUNT]]
 
 
 BLANK = "______"
@@ -232,7 +317,7 @@ def load_session(session_id: int, user_id: int, reveal: bool) -> dict:
                 "id": q.id, "section": q.section, "domain": q.domain, "skill": q.skill,
                 "skill_name": SKILL_BY_ID[q.skill].name, "difficulty": q.difficulty, "qtype": q.qtype,
                 "stem": q.stem, "choices": q.choices, "excerpt": q.excerpt, "passage_id": q.passage_id,
-                "reason": it.reason,
+                "reason": it.reason, "source": it.source, "origin": q.origin, "parent_id": q.parent_id,
             }
             if q.passage_id:
                 p = s.get(Passage, q.passage_id)
