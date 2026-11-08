@@ -58,13 +58,36 @@ The **Insights** page shows what the coach knows about you: a skill-by-difficult
 sat-coach serve [--host 0.0.0.0]  # web app; use 0.0.0.0 to let another device on your Wi-Fi join
 sat-coach fetch-passages          # download more real passages (Project Gutenberg + PLOS open access)
 sat-coach generate --math 12 --rw-sets 2   # pre-generate questions so sessions start instantly
-sat-coach import-pdfs ~/Downloads/sat     # import official practice PDFs you downloaded (see below)
+sat-coach import-pdfs ~/Downloads/sat     # import official practice tests + answer explanations (see below)
 sat-coach stats "Ana"             # projected score and weakest skills for a profile
 sat-coach bank                    # how many questions are original / official / generated
 sat-coach bank --origin generated --section math   # list the generated questions
 sat-coach preview "Ana"           # what Ana's next session will contain and which questions it will generate
 sat-coach users add "Ana" / sat-coach users list
 ```
+
+## Importing official practice tests
+
+College Board publishes free practice tests: the Digital SAT practice tests in Bluebook, and the older paper SAT practice tests. Each comes with an *Answer Explanations* PDF. To practice with them:
+
+1. Download the tests and their answer explanations into one folder. Keep each test next to its answers file, named so they match, for example:
+   ```
+   sat-practice-test-1.pdf
+   sat-practice-test-1-answers.pdf
+   ```
+   Any file whose name contains "answer", "explanation", "key" or "scoring" is read as an answers file. The rest of the name pairs it with its test.
+2. Run `sat-coach import-pdfs <folder>`. This needs a Gemini or Claude key.
+
+What gets imported:
+- **Paper SAT Reading:** the long passages become articles with their real question sets, including paired passages. Line-number references are turned into quoted excerpts.
+- **Paper SAT Writing and Language:** each underlined portion becomes a fill-in-the-blank question. "NO CHANGE" is replaced by the original wording.
+- **Digital SAT Reading and Writing:** each question keeps its own short text.
+- **Math:** both multiple-choice and student-produced response questions.
+- **Answers:** each question is matched to its official answer and explanation by section and question number. Questions with no matching answer are skipped.
+
+Not imported: questions that ask for "the best evidence for the previous answer", and questions that need a graph or figure.
+
+Imported material is tagged **Official** and stays in `data/private/`; it is never committed. Run `sat-coach bank` afterward to see what came in.
 
 ## Choosing a model
 
@@ -76,7 +99,9 @@ sat-coach users add "Ana" / sat-coach users list
 
 ## Data sources and copyright
 
-- **Seed bank** (`data/seed/`): 38 original math questions and 20 Reading & Writing questions, written for this project, about 4 public-domain texts (Austen, Lincoln, Darwin, Thoreau). MIT licensed along with the code.
+- **Seed bank** (`data/seed/`): written for this project and MIT licensed along with the code.
+  - 76 original math questions, 4 for each of the 19 Digital SAT math skills.
+  - 30 Reading & Writing questions about 6 public-domain texts: Austen, Lincoln, Darwin, Thoreau, Stanton and Mary Shelley.
 - **Fetched passages**: Project Gutenberg texts (public domain in the US) and PLOS article abstracts (CC BY 4.0). Each passage is shown with its source and license.
 - **Official College Board material** (Bluebook practice tests, the SAT Question Bank, answer explanations) is copyrighted. This repo does **not** include or redistribute it. `sat-coach import-pdfs` lets you use PDFs **you downloaded yourself** for your own practice and as generation examples. They're stored in `data/private/`, which is gitignored. Khan Academy content is not scraped; its terms don't allow it.
 

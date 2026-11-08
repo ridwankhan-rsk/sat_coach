@@ -45,15 +45,21 @@ def fetch_passages(gutenberg: bool = True, plos: bool = True):
 
 @app.command("import-pdfs")
 def import_pdfs(folder: Path = typer.Argument(..., exists=True, file_okay=False)):
-    """Import official practice PDFs you downloaded (kept private in data/private/)."""
-    from .ingest.pdf_import import import_pdf
+    """Import official practice tests and their answer explanations from PDFs you downloaded.
+
+    Keep each test next to its answers file (e.g. sat-practice-test-1.pdf and
+    sat-practice-test-1-answers.pdf). Everything stays private in data/private/."""
+    from .ingest.pdf_import import import_folder
     from .llm import get_llm
 
     llm = get_llm()
     if llm is None:
         raise typer.BadParameter("Set GEMINI_API_KEY (or ANTHROPIC_API_KEY) in .env first.")
-    for pdf in sorted(folder.glob("*.pdf")):
-        typer.echo(f"{pdf.name}: {import_pdf(llm, pdf)} questions imported")
+    for name, st in import_folder(llm, folder).items():
+        typer.echo(f"{name}: {st['questions']} questions, {st['passages']} passages imported"
+                   + (f"; {st['no_answer']} skipped for lack of an answer (is the answers PDF in the folder?)" if st["no_answer"] else "")
+                   + (f"; {st['skipped']} skipped as incomplete" if st["skipped"] else ""))
+    _bank()
 
 
 @app.command()

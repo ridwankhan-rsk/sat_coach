@@ -2,7 +2,6 @@ from fastapi.testclient import TestClient
 
 from sat_coach.api import app
 from sat_coach.ingest import passages
-from sat_coach.ingest.pdf_import import chunk
 from sat_coach.llm import parse_json
 
 
@@ -47,6 +46,3 @@ def test_parse_json_tolerates_fences():
     assert parse_json('```json\n{"a": 1}\n```') == {"a": 1}
     assert parse_json('Here you go: {"a": [1, 2]} thanks') == {"a": [1, 2]}
 
-
-def test_pdf_chunking():
-    assert len(chunk(["a" * 7000, "b" * 7000, "c" * 100])) == 2
